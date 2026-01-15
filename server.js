@@ -179,7 +179,8 @@ async function lookupUserByName(name, sfTok) {
 const syncedCalls = new Set(); // Track synced calls (upgrade to DB later)
 let lastSyncTime = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(); // Start from 24h ago
 
-app.get("/sync/ringcentral", async (req, res) => {
+// Core sync function (used by both endpoint and scheduled job)
+async function performSync() {
   const startTime = Date.now();
   let synced = 0;
   let skipped = 0;
@@ -450,8 +451,8 @@ app.get("/sync/ringcentral", async (req, res) => {
     console.log(`   ⏭️  Skipped: ${skipped}`);
     console.log(`   ❌ Errors: ${errors.length}`);
     console.log(`   📅 Next sync from: ${lastSyncTime}`);
-    
-    res.json({
+
+    return {
       ok: true,
       synced,
       skipped,
@@ -461,20 +462,30 @@ app.get("/sync/ringcentral", async (req, res) => {
       uniqueSessions: uniqueCalls.size,
       lastSyncTime,
       duration: `${duration}ms`
-    });
-    
+    };
+
   } catch (e) {
     const duration = Date.now() - startTime;
     console.error(`❌ RINGCENTRAL SYNC FAILED after ${duration}ms`);
     console.error(`   Error:`, e?.response?.data || e.message);
-    
-    res.status(500).json({
+
+    return {
       ok: false,
       error: e.response?.data || e.message,
       synced,
       skipped,
       errors: errors.length
-    });
+    };
+  }
+}
+
+// Endpoint wrapper for sync
+app.get("/sync/ringcentral", async (req, res) => {
+  const result = await performSync();
+  if (result.ok) {
+    res.json(result);
+  } else {
+    res.status(500).json(result);
   }
 });
 
@@ -564,9 +575,7 @@ app.get("/test/ringcentral/mapping", async (req, res) => {
 cron.schedule('*/15 * * * *', async () => {
   console.log('\n⏰ SCHEDULED SYNC TRIGGERED');
   try {
-    // Make internal request to the sync endpoint
-    const syncUrl = `http://localhost:${process.env.PORT || 3000}/sync/ringcentral`;
-    await axios.get(syncUrl);
+    await performSync();
   } catch (err) {
     console.error('❌ Scheduled sync failed:', err.message);
   }
