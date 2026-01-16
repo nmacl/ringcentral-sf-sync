@@ -337,16 +337,24 @@ async function performSync() {
         if (!whoId) {
           try {
             const qL = encodeURIComponent(
-              `SELECT Id, Name FROM Lead WHERE Phone LIKE '%${last10Digits}%' LIMIT 1`
+              `SELECT Id, Name, ConvertedContactId FROM Lead WHERE Phone LIKE '%${last10Digits}%' LIMIT 1`
             );
             const rl = await axios.get(
               `${sfTok.instance_url}/services/data/${SF_API_VERSION}/query?q=${qL}`,
               { headers: H }
             );
             if (rl.data?.records?.[0]) {
-              whoId = rl.data.records[0].Id;
-              recordType = 'Lead';
-              console.log(`   ✅ Found Lead: ${rl.data.records[0].Name} (${whoId})`);
+              const lead = rl.data.records[0];
+              // If Lead has been converted, use the converted Contact instead
+              if (lead.ConvertedContactId) {
+                whoId = lead.ConvertedContactId;
+                recordType = 'Contact (converted from Lead)';
+                console.log(`   ✅ Found Converted Lead → Contact: ${lead.Name} (${whoId})`);
+              } else {
+                whoId = lead.Id;
+                recordType = 'Lead';
+                console.log(`   ✅ Found Lead: ${lead.Name} (${whoId})`);
+              }
             }
           } catch (err) {
             console.log(`   ⚠️  Lead lookup failed: ${err.message}`);
