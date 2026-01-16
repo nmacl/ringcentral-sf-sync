@@ -187,8 +187,15 @@ async function performSync() {
   const errors = [];
   
   try {
+    // Validate required env vars
+    const requiredVars = ['RC_SERVER', 'RC_CLIENT_ID', 'RC_CLIENT_SECRET', 'RC_JWT_TOKEN', 'SF_PRIVATE_KEY', 'SF_CONSUMER_KEY', 'SF_USERNAME'];
+    const missing = requiredVars.filter(v => !process.env[v]);
+    if (missing.length > 0) {
+      throw new Error(`Missing environment variables: ${missing.join(', ')}`);
+    }
+
     console.log(`🔄 SYNCING RINGCENTRAL CALLS since ${lastSyncTime}`);
-    
+
     // 1. Get RingCentral access token
     const rcAuth = await getRcToken();
     const rcToken = rcAuth.access_token;
@@ -582,7 +589,11 @@ cron.schedule('*/15 * * * *', async () => {
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
+app.listen(port, async () => {
   console.log(`Server listening on :${port}`);
   console.log('📅 Scheduled RingCentral sync: Every 15 minutes');
+
+  // Run sync once on startup
+  console.log('\n🚀 Running initial sync on startup...');
+  await performSync();
 });
