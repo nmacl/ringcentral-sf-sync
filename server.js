@@ -179,11 +179,19 @@ async function lookupUserByName(name, sfTok) {
 const syncedCalls = new Set(); // Track synced calls (upgrade to DB later)
 let lastSyncTime = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(); // Start from 24h ago
 
+// A call is only eligible to sync once its end time is at least this many
+// minutes in the past. Anything newer is deferred to a later sync run.
+const MIN_CALL_AGE_MINUTES = Number(process.env.MIN_CALL_AGE_MINUTES || 10);
+
 // Core sync function (used by both endpoint and scheduled job)
 async function performSync() {
   const startTime = Date.now();
   let synced = 0;
   let skipped = 0;
+  let deferred = 0;
+  // Earliest startTime among calls we deferred - the next run must reach back
+  // this far so the deferred calls come back into the query window.
+  let earliestDeferredStart = null;
   const errors = [];
   
   try {
@@ -269,6 +277,10 @@ async function performSync() {
     }
     
     // 6. Process each unique call
+    // Only calls that ended at least MIN_CALL_AGE_MINUTES ago are eligible.
+    // This gives RingCentral time to finalize duration/result/legs on the call log.
+    const eligibilityCutoff = Date.now() - MIN_CALL_AGE_MINUTES * 60 * 1000;
+
     for (const [sessionId, call] of uniqueCalls) {
       try {
         // Skip if already in Salesforce
@@ -290,7 +302,22 @@ async function performSync() {
           skipped++;
           continue;
         }
-        
+
+        // Defer calls that ended less than MIN_CALL_AGE_MINUTES ago.
+        // They are not synced now and are re-queued for the next sync run.
+        const callStartTime = new Date(call.startTime);
+        const callEndTime = new Date(callStartTime.getTime() + (call.duration * 1000));
+
+        if (callEndTime.getTime() > eligibilityCutoff) {
+          const minutesOld = Math.round((Date.now() - callEndTime.getTime()) / 60000);
+          console.log(`⏳ Deferring ${sessionId} - ended ${minutesOld}m ago (needs ${MIN_CALL_AGE_MINUTES}m), will retry next sync`);
+          if (!earliestDeferredStart || callStartTime < earliestDeferredStart) {
+            earliestDeferredStart = callStartTime;
+          }
+          deferred++;
+          continue;
+        }
+
         console.log(`\n📞 Processing call ${sessionId}:`);
         console.log(`   Direction: ${call.direction}`);
         console.log(`   From: ${call.from.phoneNumber} (${call.from.name || 'Unknown'})`);
@@ -387,10 +414,6 @@ async function performSync() {
           console.log(`   ℹ️  Defaulting to OAuth user: ${ownerId}`);
         }
 
-        // Format dates
-        const callStartTime = new Date(call.startTime);
-        const callEndTime = new Date(callStartTime.getTime() + (call.duration * 1000));
-
         // Get extension from the call
         const extension = getExtensionFromCall(call);
 
@@ -457,13 +480,20 @@ async function performSync() {
       }
     }
     
-    // Update last sync time
-    lastSyncTime = new Date().toISOString();
-    
+    // Update last sync time.
+    // If we deferred any calls, rewind the watermark to just before the earliest
+    // deferred call so the next run picks it back up instead of skipping past it.
+    if (earliestDeferredStart) {
+      lastSyncTime = new Date(earliestDeferredStart.getTime() - 1000).toISOString();
+    } else {
+      lastSyncTime = new Date().toISOString();
+    }
+
     const duration = Date.now() - startTime;
     console.log(`\n✅ SYNC COMPLETE in ${duration}ms`);
     console.log(`   ✅ Synced: ${synced}`);
     console.log(`   ⏭️  Skipped: ${skipped}`);
+    console.log(`   ⏳ Deferred (too recent): ${deferred}`);
     console.log(`   ❌ Errors: ${errors.length}`);
     console.log(`   📅 Next sync from: ${lastSyncTime}`);
 
@@ -471,10 +501,12 @@ async function performSync() {
       ok: true,
       synced,
       skipped,
+      deferred,
       errors: errors.length,
       errorDetails: errors,
       total: calls.length,
       uniqueSessions: uniqueCalls.size,
+      minCallAgeMinutes: MIN_CALL_AGE_MINUTES,
       lastSyncTime,
       duration: `${duration}ms`
     };
@@ -489,6 +521,7 @@ async function performSync() {
       error: e.response?.data || e.message,
       synced,
       skipped,
+      deferred,
       errors: errors.length
     };
   }
@@ -600,6 +633,7 @@ const port = process.env.PORT || 3000;
 app.listen(port, async () => {
   console.log(`Server listening on :${port}`);
   console.log('📅 Scheduled RingCentral sync: Every 15 minutes');
+  console.log(`⏳ Calls must have ended ${MIN_CALL_AGE_MINUTES}+ minutes ago to be synced`);
 
   // Run sync once on startup
   console.log('\n🚀 Running initial sync on startup...');
